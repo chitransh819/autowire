@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
-from ..auth import AuthConfig, AuthMiddleware, create_login_endpoint
+from ..auth import AuthConfig, AuthMiddleware, authenticate_scope, create_login_endpoint
 from .loader import scan_routes
 from .rate_limiter import ASGIRateLimitMiddleware, ServerRateLimitConfig
 from .router import wire
@@ -77,6 +77,11 @@ class WebSocket:
     async def close(self, code: int = 1000) -> None:
         await self._send({"type": "websocket.close", "code": code})
 
+    @property
+    def user(self) -> dict[str, Any] | None:
+        user = self.scope.get("autowire.user")
+        return user if isinstance(user, dict) else None
+
     def __aiter__(self) -> "WebSocket":
         return self
 
@@ -99,18 +104,43 @@ class AutoWireApp:
     def __init__(self) -> None:
         self.routes: dict[tuple[str, str], Endpoint] = {}
         self.route_names: dict[tuple[str, str], str] = {}
+        self.route_auth: dict[tuple[str, str], bool | None] = {}
         self.websockets: dict[str, Endpoint] = {}
         self.websocket_names: dict[str, str] = {}
+        self.websocket_auth: dict[str, bool | None] = {}
+        self.auth: AuthConfig | None = None
 
-    def add_route(self, path: str, endpoint: Endpoint, method: str, *, name: str | None = None) -> None:
+    def add_route(
+        self,
+        path: str,
+        endpoint: Endpoint,
+        method: str,
+        *,
+        name: str | None = None,
+        auth_required: bool | None = None,
+    ) -> None:
         key = (method.upper(), _normalize_path(path))
         self.routes[key] = endpoint
         self.route_names[key] = name or endpoint.__name__
+        self.route_auth[key] = auth_required
 
-    def add_websocket(self, path: str, endpoint: Endpoint, *, name: str | None = None) -> None:
+    def add_websocket(
+        self,
+        path: str,
+        endpoint: Endpoint,
+        *,
+        name: str | None = None,
+        auth_required: bool | None = None,
+    ) -> None:
         path = _normalize_path(path)
         self.websockets[path] = endpoint
         self.websocket_names[path] = name or endpoint.__name__
+        self.websocket_auth[path] = auth_required
+
+    def set_auth(self, auth: AuthConfig | None) -> None:
+        if auth is not None:
+            auth.validate()
+        self.auth = auth
 
     def describe_routes(self) -> list[str]:
         http = [f"{method} {path}" for (method, path) in sorted(self.routes)]
@@ -134,6 +164,8 @@ class AutoWireApp:
         if endpoint is None:
             await _json_response(send, {"detail": "Not found"}, status=404)
             return
+        if not await self._authorize_http(scope, send, self.route_auth.get((method, path))):
+            return
 
         request = Request(scope=scope, body=None, raw_body=await _read_body(receive))
         request.body = _parse_body(request.raw_body, request.headers)
@@ -152,6 +184,8 @@ class AutoWireApp:
         if endpoint is None:
             await send({"type": "websocket.close", "code": 1008})
             return
+        if not await self._authorize_websocket(scope, send, self.websocket_auth.get(path)):
+            return
         socket = WebSocket(scope, receive, send)
         try:
             result = endpoint(socket)
@@ -159,6 +193,44 @@ class AutoWireApp:
                 await result
         except Exception:
             await socket.close(code=1011)
+
+    async def _authorize_http(
+        self,
+        scope: Scope,
+        send: Send,
+        auth_required: bool | None,
+    ) -> bool:
+        if await self._authorize(scope, auth_required):
+            return True
+        await _json_response(send, {"detail": "Unauthorized"}, status=401)
+        return False
+
+    async def _authorize_websocket(
+        self,
+        scope: Scope,
+        send: Send,
+        auth_required: bool | None,
+    ) -> bool:
+        if await self._authorize(scope, auth_required):
+            return True
+        await send({"type": "websocket.close", "code": 1008})
+        return False
+
+    async def _authorize(self, scope: Scope, auth_required: bool | None) -> bool:
+        auth = self.auth
+        if auth is None or not auth.enabled:
+            return True
+        path = str(scope.get("path", "/"))
+        if path in auth.exempt_paths:
+            return True
+        required = auth.default_required if auth_required is None else auth_required
+        if not required:
+            return True
+        user = await authenticate_scope(scope, auth)
+        if user is None:
+            return False
+        scope["autowire.user"] = user
+        return True
 
 
 def create_app(
@@ -170,11 +242,16 @@ def create_app(
     app = AutoWireApp()
     routes = scan_routes(routes_folder)
     wire(app, routes)
+    app.set_auth(auth)
     wrapped: AutoWireApp | AuthMiddleware | ASGIRateLimitMiddleware = app
     if auth is not None and auth.login_enabled:
-        app.add_route("/auth/login", create_login_endpoint(auth), "POST", name="login")
-    if auth is not None and auth.enabled:
-        wrapped = AuthMiddleware(wrapped, auth)
+        app.add_route(
+            "/auth/login",
+            create_login_endpoint(auth),
+            "POST",
+            name="login",
+            auth_required=False,
+        )
     if rate_limit is not None:
         wrapped = ASGIRateLimitMiddleware(wrapped, rate_limit)
     return wrapped

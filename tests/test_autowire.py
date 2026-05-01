@@ -67,8 +67,8 @@ def response_body(messages: list[dict[str, Any]]) -> Any:
 def test_create_app_scans_route_files(workspace_tmp: Path) -> None:
     routes = workspace_tmp / "routes"
     routes.mkdir()
-    (routes / "users.py").write_text(
-        "from autowire import get\n\n@get\ndef fetch(request):\n    return {'users': ['Alice']}\n",
+    (routes / "api.py").write_text(
+        "from autowire import get\n\n@get\ndef users(request):\n    return {'users': ['Alice']}\n",
         encoding="utf-8",
     )
 
@@ -82,8 +82,8 @@ def test_create_app_scans_route_files(workspace_tmp: Path) -> None:
 async def test_http_route_returns_json(workspace_tmp: Path) -> None:
     routes = workspace_tmp / "routes"
     routes.mkdir()
-    (routes / "users.py").write_text(
-        "from autowire import get\n\n@get\ndef fetch(request):\n    return {'users': ['Alice']}\n",
+    (routes / "api.py").write_text(
+        "from autowire import get\n\n@get\ndef users(request):\n    return {'users': ['Alice']}\n",
         encoding="utf-8",
     )
     app = create_app(routes)
@@ -98,9 +98,9 @@ async def test_http_route_returns_json(workspace_tmp: Path) -> None:
 async def test_post_route_receives_json_body(workspace_tmp: Path) -> None:
     routes = workspace_tmp / "routes"
     routes.mkdir()
-    (routes / "users.py").write_text(
+    (routes / "api.py").write_text(
         "from autowire import post\n\n"
-        "@post\n"
+        "@post('/users')\n"
         "def create(request):\n"
         "    return {'created': request.body['name']}\n",
         encoding="utf-8",
@@ -123,8 +123,8 @@ async def test_post_route_receives_json_body(workspace_tmp: Path) -> None:
 async def test_rate_limit_can_wrap_autowire_app(workspace_tmp: Path) -> None:
     routes = workspace_tmp / "routes"
     routes.mkdir()
-    (routes / "users.py").write_text(
-        "from autowire import get\n\n@get\ndef fetch(request):\n    return {'ok': True}\n",
+    (routes / "api.py").write_text(
+        "from autowire import get\n\n@get\ndef users(request):\n    return {'ok': True}\n",
         encoding="utf-8",
     )
     app = create_app(
@@ -143,12 +143,14 @@ async def test_rate_limit_can_wrap_autowire_app(workspace_tmp: Path) -> None:
 async def test_rate_limit_tracks_endpoints_independently(workspace_tmp: Path) -> None:
     routes = workspace_tmp / "routes"
     routes.mkdir()
-    (routes / "users.py").write_text(
-        "from autowire import get\n\n@get\ndef fetch(request):\n    return {'users': []}\n",
-        encoding="utf-8",
-    )
-    (routes / "orders.py").write_text(
-        "from autowire import get\n\n@get\ndef fetch(request):\n    return {'orders': []}\n",
+    (routes / "api.py").write_text(
+        "from autowire import get\n\n"
+        "@get\n"
+        "def users(request):\n"
+        "    return {'users': []}\n\n"
+        "@get\n"
+        "def orders(request):\n"
+        "    return {'orders': []}\n",
         encoding="utf-8",
     )
     app = create_app(
@@ -169,8 +171,8 @@ async def test_successful_rate_limited_responses_do_not_emit_retry_after(
 ) -> None:
     routes = workspace_tmp / "routes"
     routes.mkdir()
-    (routes / "users.py").write_text(
-        "from autowire import get\n\n@get\ndef fetch(request):\n    return {'ok': True}\n",
+    (routes / "api.py").write_text(
+        "from autowire import get\n\n@get\ndef users(request):\n    return {'ok': True}\n",
         encoding="utf-8",
     )
     app = create_app(
@@ -183,3 +185,28 @@ async def test_successful_rate_limited_responses_do_not_emit_retry_after(
 
     assert response_status(messages) == 200
     assert (b"retry-after", b"0") not in start["headers"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_path_allows_multiple_methods_on_same_endpoint(
+    workspace_tmp: Path,
+) -> None:
+    routes = workspace_tmp / "routes"
+    routes.mkdir()
+    (routes / "api.py").write_text(
+        "from autowire import get, post\n\n"
+        "@get('/users')\n"
+        "def list_users(request):\n"
+        "    return {'method': 'get'}\n\n"
+        "@post('/users')\n"
+        "def create_user(request):\n"
+        "    return {'method': 'post'}\n",
+        encoding="utf-8",
+    )
+    app = create_app(routes)
+
+    get_messages = await call_http(app, method="GET", path="/users")
+    post_messages = await call_http(app, method="POST", path="/users")
+
+    assert response_body(get_messages) == {"method": "get"}
+    assert response_body(post_messages) == {"method": "post"}

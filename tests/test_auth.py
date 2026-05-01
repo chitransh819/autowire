@@ -94,13 +94,19 @@ def body(messages: list[dict[str, Any]]) -> Any:
 def make_routes(tmp_path: Path) -> Path:
     routes = tmp_path / "routes"
     routes.mkdir()
-    (routes / "users.py").write_text(
-        "from autowire import get\n\n@get\ndef fetch(request):\n    return {'user': request.user}\n",
+    (routes / "api.py").write_text(
+        "from autowire import get\n\n"
+        "@get(auth=True)\n"
+        "def users(request):\n"
+        "    return {'user': request.user}\n\n"
+        "@get(auth=False)\n"
+        "def public_status(request):\n"
+        "    return {'public': True, 'user': request.user}\n",
         encoding="utf-8",
     )
-    (routes / "stats.py").write_text(
+    (routes / "realtime.py").write_text(
         "from autowire import websocket\n\n"
-        "@websocket\n"
+        "@websocket('/stats', auth=True)\n"
         "async def connect(socket):\n"
         "    await socket.send({'ok': True})\n",
         encoding="utf-8",
@@ -126,6 +132,19 @@ async def test_api_token_auth_protects_http_routes(workspace_tmp: Path) -> None:
     assert status(rejected) == 401
     assert status(accepted) == 200
     assert body(accepted)["user"]["type"] == "api_token"
+
+
+@pytest.mark.asyncio
+async def test_endpoint_can_opt_out_of_auth(workspace_tmp: Path) -> None:
+    app = create_app(
+        make_routes(workspace_tmp),
+        auth=AuthConfig(api_token_enabled=True, api_tokens=frozenset({"secret-token"})),
+    )
+
+    messages = await call_http(app, method="GET", path="/public-status")
+
+    assert status(messages) == 200
+    assert body(messages) == {"public": True, "user": None}
 
 
 @pytest.mark.asyncio

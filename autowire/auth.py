@@ -5,9 +5,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import inspect
 import json
 import time
-import inspect
 from collections.abc import Awaitable, Callable, Iterable, MutableMapping
 from dataclasses import dataclass
 from typing import Any
@@ -34,6 +34,7 @@ class AuthConfig:
     credential_resolver: CredentialResolver | None = None
     token_ttl_seconds: int = 3600
     exempt_paths: frozenset[str] = frozenset({"/health", "/auth/login"})
+    default_required: bool = True
 
     @property
     def enabled(self) -> bool:
