@@ -1,66 +1,122 @@
 # Autowire
 
-Autowire is a plug-and-play Python backend framework for APIs and WebSockets.
+Autowire is a plug-and-play Python backend framework for building APIs and
+WebSocket services with almost no setup.
 
-You create files inside a `routes/` folder. Autowire scans them, detects the
-decorators, and wires the server automatically.
+Instead of manually creating routers, importing route modules, and registering
+every endpoint, you create files inside a `routes/` folder. Autowire scans those
+files and wires the server automatically.
 
 ```text
 routes/
-  users.py   -> GET /users and POST /users
-  chat.py    -> WebSocket /chat
-  stats.py   -> WebSocket /stats
+  users.py       -> GET /users, POST /users
+  orders.py      -> GET /orders, POST /orders
+  stats.py       -> WebSocket /stats
+  chat.py        -> WebSocket /chat
 ```
 
-No router registration. No app boilerplate. Drop a file, write the logic, run
-the server.
+Drop a file. Add a decorator. Run the server.
 
-## Why Autowire?
+## What Autowire Is For
 
-Most small backend projects repeat the same setup:
+Autowire is useful when you want to build a backend quickly but still keep a
+real server-side structure:
 
-- create a server app
-- create a router
-- import every route module
-- register every endpoint
-- wire WebSockets separately
-- add rate limiting
-- add auth
-- add a simple database
+- internal tools
+- dashboards
+- realtime status panels
+- small SaaS APIs
+- admin APIs
+- bot backends
+- IoT/device status servers
+- notification services
+- prototypes that should still be deployable later
 
-Autowire turns that into a file-based workflow. The framework handles the wiring
-so developers can focus on business logic.
+It is intentionally simple: route files contain your application logic, and
+Autowire handles the wiring.
+
+## Core Idea
+
+A route file becomes an endpoint path.
+
+```text
+routes/users.py       -> /users
+routes/user_stats.py  -> /user-stats
+routes/chat.py        -> /chat
+```
+
+Decorators decide what type of endpoint exists in that file.
+
+```python
+from autowire import get, post, websocket
+
+
+@get
+def fetch(request):
+    return {"message": "GET /users"}
+
+
+@post
+def create(request):
+    return {"message": "POST /users", "body": request.body}
+
+
+@websocket
+async def connect(socket):
+    await socket.send("Connected")
+```
+
+If this code is in `routes/users.py`, Autowire creates:
+
+```text
+GET /users
+POST /users
+WS  /users
+```
 
 ## Features
 
-- File-based HTTP routes.
-- File-based WebSocket routes.
+- File-based HTTP routing.
+- File-based WebSocket routing.
 - `@get`, `@post`, `@put`, `@patch`, `@delete`, and `@websocket` decorators.
-- ASGI app that runs with Uvicorn.
+- ASGI server support through Uvicorn.
+- JSON request parsing.
+- JSON/plain-text response handling.
+- SQLite helper with automatic database file creation.
 - Optional endpoint-aware rate limiting.
 - Optional API token authentication.
 - Optional JWT authentication.
 - Optional login/password endpoint that issues JWTs.
-- SQLite helper with automatic default database creation.
-- Small client adapter hook for `ws-reconnect-manager`.
+- Resolver callbacks so each requester can use their own API token or login.
+- WebSocket auth through bearer headers or query tokens.
+- Small client-side WebSocket adapter hook for `ws-reconnect-manager`.
 
 ## Installation
+
+From GitHub:
+
+```bash
+pip install git+https://github.com/chitransh819/autowire.git
+```
 
 For local development from source:
 
 ```bash
+git clone https://github.com/chitransh819/autowire.git
+cd autowire
 pip install -e ".[dev]"
+pytest
 ```
 
-When published later:
+When published to PyPI later:
 
 ```bash
 pip install autowire
 ```
 
-## Quick Start
+## First Project
 
-Create a project:
+Create a new folder:
 
 ```text
 my-api/
@@ -77,25 +133,39 @@ from autowire import get, post, get_database
 db = get_database()
 
 
-@get
-async def fetch(request):
+async def ensure_schema():
     await db.executescript(
         """
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         """
     )
-    return {
-        "users": await db.fetch_all("SELECT id, name FROM users ORDER BY id")
-    }
+
+
+@get
+async def fetch(request):
+    await ensure_schema()
+    users = await db.fetch_all(
+        """
+        SELECT id, name, created_at
+        FROM users
+        ORDER BY id ASC
+        """
+    )
+    return {"users": users}
 
 
 @post
 async def create(request):
+    await ensure_schema()
     name = request.body["name"]
-    user_id = await db.execute("INSERT INTO users (name) VALUES (?)", (name,))
+    user_id = await db.execute(
+        "INSERT INTO users (name) VALUES (?)",
+        (name,),
+    )
     return {"id": user_id, "name": name}, 201
 ```
 
@@ -112,24 +182,26 @@ db = get_database()
 @websocket
 async def connect(socket):
     while True:
-        stats = await db.fetch_one("SELECT COUNT(*) AS total_users FROM users")
+        stats = await db.fetch_one(
+            "SELECT COUNT(*) AS total_users FROM users"
+        )
         await socket.send(stats or {"total_users": 0})
         await asyncio.sleep(15)
 ```
 
-Run:
+Run the app:
 
 ```bash
 autowire run
 ```
 
-The server starts at:
+Autowire starts the server at:
 
 ```text
 http://127.0.0.1:8000
 ```
 
-Generated routes:
+Detected routes:
 
 ```text
 GET  /users
@@ -137,64 +209,118 @@ POST /users
 WS   /stats
 ```
 
-## Route Rules
+Try it:
 
-Each Python file in `routes/` becomes a URL path.
-
-```text
-routes/users.py       -> /users
-routes/user_stats.py  -> /user-stats
-routes/chat.py        -> /chat
+```bash
+curl http://127.0.0.1:8000/users
 ```
 
-Functions become handlers when decorated:
+```bash
+curl -X POST http://127.0.0.1:8000/users \
+  -H "Content-Type: application/json" \
+  -d "{\"name\":\"Alice\"}"
+```
+
+## CLI
+
+Run a project from its root folder:
+
+```bash
+autowire run
+```
+
+Use a custom routes folder:
+
+```bash
+autowire run --routes app_routes
+```
+
+Change host and port:
+
+```bash
+autowire run --host 0.0.0.0 --port 8000
+```
+
+Enable rate limiting from the CLI:
+
+```bash
+autowire run --rate-limit 120 --rate-period 60
+```
+
+## Python Entrypoint
+
+For production deployments, create an explicit ASGI entrypoint such as `app.py`:
 
 ```python
-from autowire import get, post, websocket
+from autowire import create_app
 
+app = create_app("routes")
+```
 
-@get
-def fetch(request):
-    return {"ok": True}
+Run with Uvicorn:
 
-
-@post
-def create(request):
-    return {"created": request.body}
-
-
-@websocket
-async def connect(socket):
-    await socket.send("connected")
+```bash
+python -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
 ## Request Object
 
-HTTP route functions receive a `request` object.
+HTTP handlers receive a `request` object.
+
+```python
+@get
+def fetch(request):
+    return {
+        "method": request.method,
+        "path": request.path,
+        "query": request.query,
+        "headers": request.headers,
+        "user": request.user,
+    }
+```
 
 Useful properties:
 
 ```python
-request.method   # "GET", "POST", ...
+request.method   # "GET", "POST", "PUT", ...
 request.path     # "/users"
 request.headers  # lowercase dict
 request.query    # dict[str, list[str]]
 request.body     # parsed JSON dict, raw bytes, or {}
-request.user     # auth payload when auth is enabled
+request.user     # authenticated user payload, or None
 ```
 
-Return values:
+## Responses
+
+Return JSON:
 
 ```python
-return {"ok": True}          # JSON 200
+return {"ok": True}
+```
+
+Return JSON with status:
+
+```python
 return {"created": True}, 201
-return "plain text"
-return None                  # 204
+```
+
+Return plain text:
+
+```python
+return "hello"
+```
+
+Return empty response:
+
+```python
+return None
 ```
 
 ## WebSockets
 
-WebSocket route functions receive a `socket` object.
+WebSocket handlers receive a `socket` object.
+
+Echo server:
 
 ```python
 from autowire import websocket
@@ -207,9 +333,25 @@ async def connect(socket):
         await socket.send(f"Echo: {message}")
 ```
 
+Stats stream:
+
+```python
+import asyncio
+
+from autowire import websocket
+
+
+@websocket
+async def connect(socket):
+    while True:
+        await socket.send({"active": True})
+        await asyncio.sleep(15)
+```
+
 ## Database
 
-Autowire includes a tiny SQLite helper for plug-and-play persistence.
+Autowire includes a small SQLite helper for projects that need persistence
+without setting up a full database server.
 
 ```python
 from autowire import get_database
@@ -217,35 +359,51 @@ from autowire import get_database
 db = get_database()
 ```
 
-Default database path:
+Default path:
 
 ```text
 data/autowire.db
 ```
 
-Override it:
+Set a custom path:
 
-```bash
-set AUTOWIRE_DB_PATH=data/my-app.db
+Windows PowerShell:
+
+```powershell
+$env:AUTOWIRE_DB_PATH = "data/my-app.db"
 ```
 
-or on Linux/macOS:
+Linux/macOS:
 
 ```bash
 export AUTOWIRE_DB_PATH=data/my-app.db
 ```
 
-The parent folder and database file are created automatically.
+The folder and database file are created automatically.
+
+Basic usage:
+
+```python
+await db.executescript(
+    """
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL
+    );
+    """
+)
+
+user_id = await db.execute(
+    "INSERT INTO users (name) VALUES (?)",
+    ("Alice",),
+)
+
+users = await db.fetch_all("SELECT id, name FROM users")
+```
 
 ## Rate Limiting
 
-From the CLI:
-
-```bash
-autowire run --rate-limit 120 --rate-period 60
-```
-
-From Python:
+Rate limiting can be enabled in an ASGI entrypoint:
 
 ```python
 from autowire import RateLimit, ServerRateLimitConfig, create_app
@@ -258,20 +416,25 @@ app = create_app(
 )
 ```
 
+This means each identity gets up to `120` requests per `60` seconds.
+
 ## Authentication
 
-Auth is configured once at app creation. Routes do not need to repeat auth code.
+Autowire auth is configured once when creating the app. Route files do not need
+to repeat auth checks.
 
-Autowire supports two styles:
+Autowire supports:
 
-- simple static credentials for small internal tools
-- resolver callbacks for real apps where every requester has their own API token
-  or their own login/password stored in a database
+- API token auth
+- JWT bearer auth
+- login/password auth that issues JWTs
+- database-backed resolver callbacks for real users
 
-### API Token
+If multiple auth modes are enabled, any valid mode can authenticate the request.
 
-For production apps, use `api_token_resolver` so every requester can have their
-own token.
+### API Token Auth For Real Users
+
+Use `api_token_resolver` when every requester has their own API token.
 
 ```python
 from autowire import AuthConfig, create_app, get_database
@@ -296,6 +459,7 @@ async def resolve_api_token(token: str):
         "plan": user["plan"],
     }
 
+
 app = create_app(
     "routes",
     auth=AuthConfig(
@@ -308,10 +472,12 @@ app = create_app(
 Request:
 
 ```bash
-curl http://localhost:8000/users -H "X-API-Token: token-1"
+curl http://localhost:8000/users -H "X-API-Token: user-token"
 ```
 
-For a tiny internal tool, static tokens also work:
+### Static API Tokens
+
+Static tokens are useful for simple internal tools.
 
 ```python
 from autowire import AuthConfig, create_app, parse_api_tokens
@@ -325,28 +491,9 @@ app = create_app(
 )
 ```
 
-### JWT
+### Login And Password For Real Users
 
-```python
-app = create_app(
-    "routes",
-    auth=AuthConfig(
-        jwt_enabled=True,
-        jwt_secret="change-this-secret",
-    ),
-)
-```
-
-Request:
-
-```bash
-curl http://localhost:8000/users -H "Authorization: Bearer <jwt>"
-```
-
-### Login ID And Password
-
-For production apps, use `credential_resolver` so each requester can log in with
-their own credentials.
+Use `credential_resolver` when every requester has their own login.
 
 ```python
 from autowire import AuthConfig, create_app, get_database
@@ -357,7 +504,7 @@ db = get_database()
 async def resolve_credentials(username: str, password: str):
     user = await db.fetch_one(
         """
-        SELECT id, username, password
+        SELECT id, username, password_hash
         FROM users
         WHERE username = ?
         """,
@@ -366,14 +513,15 @@ async def resolve_credentials(username: str, password: str):
     if user is None:
         return None
 
-    # In a real app, store password hashes and verify with bcrypt/argon2.
-    if user["password"] != password:
+    # Replace this with bcrypt/argon2 password hash verification in production.
+    if user["password_hash"] != password:
         return None
 
     return {
         "sub": str(user["id"]),
         "username": user["username"],
     }
+
 
 app = create_app(
     "routes",
@@ -391,54 +539,91 @@ Autowire automatically creates:
 POST /auth/login
 ```
 
-Login:
+Login request:
 
 ```bash
-curl -X POST http://localhost:8000/auth/login ^
-  -H "Content-Type: application/json" ^
-  -d "{\"username\":\"admin\",\"password\":\"change-this-password\"}"
+curl -X POST http://localhost:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"alice\",\"password\":\"alice-password\"}"
 ```
 
-Use the returned token:
+Response:
+
+```json
+{
+  "access_token": "<jwt>",
+  "token_type": "bearer"
+}
+```
+
+Use the token:
 
 ```bash
-curl http://localhost:8000/users -H "Authorization: Bearer <token>"
+curl http://localhost:8000/users \
+  -H "Authorization: Bearer <jwt>"
 ```
 
-### Multiple Auth Modes
+### JWT Auth
 
-You can enable API token, JWT, and login together. If any enabled auth method is
-valid, the request is accepted.
-
-WebSockets can authenticate with:
-
-```text
-Authorization: Bearer <token>
-```
-
-or:
-
-```text
-ws://localhost:8000/stats?token=<token>
-```
-
-## Python Entrypoint
-
-For production servers, create your own `app.py`:
+If your app already issues JWTs somewhere else, Autowire can verify them:
 
 ```python
+app = create_app(
+    "routes",
+    auth=AuthConfig(
+        jwt_enabled=True,
+        jwt_secret="change-this-secret",
+    ),
+)
+```
+
+### WebSocket Auth
+
+WebSockets can authenticate with a bearer header:
+
+```text
+Authorization: Bearer <jwt>
+```
+
+or with a query token:
+
+```text
+ws://localhost:8000/stats?token=<jwt>
+```
+
+## Configuration Pattern
+
+Autowire does not force a configuration system. A common pattern is to read
+environment variables in your own `app.py`.
+
+```python
+import os
+
 from autowire import AuthConfig, RateLimit, ServerRateLimitConfig, create_app
 
 app = create_app(
     "routes",
     rate_limit=ServerRateLimitConfig(
-        default_limit=RateLimit(rate=120, period=60),
+        default_limit=RateLimit(
+            rate=int(os.getenv("RATE_LIMIT", "120")),
+            period=float(os.getenv("RATE_PERIOD", "60")),
+        ),
     ),
     auth=AuthConfig(
-        api_token_enabled=True,
-        api_tokens=frozenset({"server-token"}),
+        jwt_enabled=os.getenv("JWT_ENABLED") == "true",
+        jwt_secret=os.getenv("JWT_SECRET", ""),
     ),
 )
+```
+
+## Deployment
+
+Create `app.py`:
+
+```python
+from autowire import create_app
+
+app = create_app("routes")
 ```
 
 Run:
@@ -447,37 +632,42 @@ Run:
 python -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
-## Project Structure
+For production, run behind a reverse proxy such as Nginx/Caddy and use a process
+manager such as systemd, Docker, or your hosting provider's service manager.
 
-This GitHub-ready folder intentionally stays small:
+## Relationship To Supporting Packages
+
+Autowire is designed to work with your supporting packages later:
+
+- `ws-reconnect-manager` for reconnecting client-side WebSocket connections.
+- `smart-api-limiter` or a server rate-limiter package for external rate-limit
+  implementations.
+
+Autowire currently includes small built-in compatible pieces so it works before
+those packages are published.
+
+## Repository Structure
 
 ```text
 autowire/
   autowire/          # framework source
-  examples/routes/   # minimal route examples
+  examples/routes/   # minimal examples
   tests/             # framework tests
   pyproject.toml
   README.md
 ```
 
-Large deployment templates should live in separate repositories or examples
-outside the core framework repo.
-
-## Relationship To Your Other Packages
-
-Autowire can later integrate with your separate PyPI packages:
-
-- `ws-reconnect-manager` for generated/reconnecting WebSocket clients.
-- `smart-api-limiter` or your server rate-limiter package for externalized rate
-  limiting.
-
-For now, Autowire contains small built-in compatible pieces so it works before
-those packages are published.
-
 ## Development
+
+Install locally:
 
 ```bash
 pip install -e ".[dev]"
+```
+
+Run tests:
+
+```bash
 pytest
 ```
 
